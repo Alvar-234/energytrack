@@ -1,0 +1,19 @@
+# EnergyTrack — Dependencias
+# Instalar con: pip install -r requirements.txt
+
+# Data & ETL
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0          # soporte Parquet para el Data Lake
+
+# Base de datos
+psycopg2-binary>=2.9.0   # driver PostgreSQL
+sqlalchemy>=2.0.0        # ORM / engine para pandas + PostgreSQL
+
+# Dashboard
+dash>=2.14.0
+dash-bootstrap-components>=1.5.0
+plotly>=5.18.0
+
+# Reportes PDF
+reportlab>=4.0.0
