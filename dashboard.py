@@ -1,6 +1,6 @@
 """
-EnergyTrack — Dashboard
-Lee ÚNICAMENTE del Data Warehouse (data_warehouse.db).
+EnergyTrack — Dashboard (Versión Streaming / Arquitectura Kappa)
+Lee ÚNICAMENTE del Data Warehouse (PostgreSQL).
 No accede al lake ni al stream directamente.
 
 EJECUTAR:
@@ -16,7 +16,6 @@ from dash import Dash, dcc, html, Input, Output
 import dash_bootstrap_components as dbc
 import base64, io, json
 from datetime import datetime, timedelta
-from dash import dcc
 from config import LAKE_RAW, LAKE_PROCESSED, PG_CONFIG
 
 # PDF
@@ -25,13 +24,15 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                                 Table, TableStyle, HRFlowable)
+                                Table, TableStyle, HRFlowable)
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
+# ══════════════════════════════════════════════════════════
 #  LEER DEL DWH
+# ══════════════════════════════════════════════════════════
 
 def dwh(sql: str) -> pd.DataFrame:
-    """Consulta el Data Warehouse (PostgreSQL) y devuelve un DataFrame."""
+    """Consulta el Data Warehouse (PostgreSQL) and devuelve un DataFrame."""
     return _dwh_q(sql)
 
 def estado_sistema() -> dict:
@@ -52,7 +53,9 @@ def estado_sistema() -> dict:
     except Exception as e:
         return {"dwh_ok": False}
 
+# ══════════════════════════════════════════════════════════
 #  TEMA VISUAL
+# ══════════════════════════════════════════════════════════
 
 BG      = "#0F172A"
 CARD    = "#1E293B"
@@ -89,7 +92,6 @@ def fmt_bar(v):
     elif v > 0:      return f"{v:.2e}"
     else:            return "0"
 
-
 def card(titulo, contenido, borde=ACCENT):
     return html.Div(style={
         "background":CARD,"borderRadius":"12px","padding":"18px","height":"100%",
@@ -122,9 +124,9 @@ def fig(f, h=300):
     )
     return f
 
-#  APP
-
+# ══════════════════════════════════════════════════════════
 #  GENERADOR DE REPORTES PDF
+# ══════════════════════════════════════════════════════════
 
 AZUL_CFE  = colors.HexColor("#1E3A5F")
 CYAN      = colors.HexColor("#38BDF8")
@@ -235,7 +237,7 @@ def generar_pdf(periodo: str, valor: str) -> bytes:
         GROUP BY t.hora ORDER BY t.hora
     """)
 
-# Construir PDF
+    # Construir PDF
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter,
                             leftMargin=0.75*inch, rightMargin=0.75*inch,
@@ -262,7 +264,7 @@ def generar_pdf(periodo: str, valor: str) -> bytes:
             ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor("#F8FAFC")]),
             ("GRID",        (0,0), (-1,-1), 0.3, colors.HexColor("#E2E8F0")),
             ("TOPPADDING",  (0,0), (-1,-1), 5),
-            ("BOTTOMPADDING",(0,0),(-1,-1), 5),
+            ("BOTTOMPADDING",(0,0), (-1,-1), 5),
             ("LEFTPADDING", (0,0), (-1,-1), 6),
         ]
         if col_colors:
@@ -369,6 +371,9 @@ def generar_pdf(periodo: str, valor: str) -> bytes:
     doc.build(story)
     return buf.getvalue()
 
+# ══════════════════════════════════════════════════════════
+#  INICIALIZACIÓN DE LA APP DASH
+# ══════════════════════════════════════════════════════════
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.CYBORG],
            title="EnergyTrack", suppress_callback_exceptions=True)
@@ -425,7 +430,9 @@ app.layout = html.Div(style={
     ]),
 ])
 
-#  SIDEBAR — estado en tiempo real
+# ══════════════════════════════════════════════════════════
+#  CALLBACK SIDEBAR
+# ══════════════════════════════════════════════════════════
 
 @app.callback(
     Output("sb-estado","children"),
@@ -447,16 +454,15 @@ def actualizar_sidebar(n):
             _sb_row("Hogares", f"{e['hogares_activos']}", SUBTXT),
         ])
 
-    # Estado de cada capa
     dwh_ok    = e.get("dwh_ok", False)
     lake_raw  = LAKE_RAW.exists() and bool(list(LAKE_RAW.rglob("*.parquet")))
     lake_proc = LAKE_PROCESSED.exists() and bool(list(LAKE_PROCESSED.rglob("*.parquet")))
 
     arq = html.Div([
-        _sb_capa("Stream → Lake RAW",  lake_raw),
-        _sb_capa("ETL → Processed",    lake_proc),
-        _sb_capa("Pipeline → DWH",     dwh_ok),
-        _sb_capa("Dashboard ← DWH",    dwh_ok),
+        html.Div("● Kafka Local (Docker)", style={"color":VERDE if dwh_ok else SUBTXT,"fontSize":"11px","marginBottom":"5px"}),
+        _sb_capa("ETL → Processed Respaldo",  lake_proc),
+        _sb_capa("Pipeline Streaming → DWH", dwh_ok),
+        _sb_capa("Dashboard Analítico ← DWH", dwh_ok),
     ])
 
     return estado, arq
@@ -473,7 +479,9 @@ def _sb_capa(label, ok):
     color = VERDE if ok else SUBTXT
     return html.Div(dot + label, style={"color":color,"fontSize":"11px","marginBottom":"5px"})
 
+# ══════════════════════════════════════════════════════════
 #  ROUTING DE PESTAÑAS
+# ══════════════════════════════════════════════════════════
 
 @app.callback(Output("contenido","children"), Input("tabs","value"))
 def render(tab):
@@ -482,8 +490,7 @@ def render(tab):
     if tab == "anomalias": return tab_anomalias()
     return tab_reportes()
 
-#  PESTAÑA 1 — MÉTRICAS
-
+# PESTAÑA 1 — MÉTRICAS
 def tab_metricas():
     return html.Div(id="m-root", children=_render_metricas())
 
@@ -492,15 +499,13 @@ def _render_metricas():
     if not e.get("dwh_ok"):
         return _sin_datos()
 
-    # KPIs
     kpis = dbc.Row([
         kpi("Total lecturas",   f"{e['total_lecturas']:,}", "lecturas"),
         kpi("Consumo total",    fmt_kwh(e['kwh_total']),    "kWh",      VERDE),
         kpi("Costo estimado",   fmt_mxn(e['costo_total']),  "MXN",      AMBAR),
-        kpi("Picos detectados", f"{e['total_picos']:,}",   "eventos",  ROJO),
+        kpi("Picos detectados", f"{e['total_picos']:,}",    "eventos",  ROJO),
     ], className="g-3 mb-4")
 
-    # Consumo por región (barras)
     df_r = dwh("SELECT region, SUM(kwh_total) AS kwh, SUM(costo_total) AS costo FROM v_consumo_por_region GROUP BY region ORDER BY kwh DESC")
     g_reg = go.Figure(go.Bar(
         x=df_r["region"], y=df_r["kwh"],
@@ -509,7 +514,6 @@ def _render_metricas():
     ))
     fig(g_reg, h=260)
 
-    # Ranking de hogares
     df_hog = dwh("SELECT id_hogar, ciudad, kwh_total AS kwh FROM v_consumo_por_hogar ORDER BY kwh ASC")
     colores = px.colors.sequential.Blues[2:]
     n = len(df_hog)
@@ -531,13 +535,11 @@ def _render_metricas():
         ], className="g-3"),
     ])
 
-#  PESTAÑA 2 — CONSUMO
-
+# PESTAÑA 2 — CONSUMO
 def tab_consumo():
     if not estado_sistema().get("dwh_ok"):
         return _sin_datos()
 
-    # Serie temporal diaria
     df_t = dwh("""
         SELECT fecha, region, ROUND(SUM(kwh_total)::numeric, 3) AS kwh
         FROM v_consumo_por_region GROUP BY fecha, region ORDER BY fecha
@@ -559,7 +561,6 @@ def tab_consumo():
                     tickangle=-30, tickfont=dict(size=11))
     g1.update_yaxes(title_text="kWh")
 
-    # Curva de carga horaria
     df_h = dwh("SELECT hora, ROUND(kwh_promedio::numeric,5) AS prom, ROUND(kwh_max::numeric,4) AS maximo FROM v_perfil_horario ORDER BY hora")
     g2 = go.Figure()
     
@@ -575,7 +576,6 @@ def tab_consumo():
                     tickvals=list(range(24)), tickangle=-30, tickfont=dict(size=10))
     g2.update_yaxes(title_text="kWh")
 
-    # Mapa de calor hora × día
     df_all = dwh("""
         SELECT t.dia_semana, t.hora, AVG(f.kwh_intervalo) AS kwh
         FROM fact_consumo f JOIN dim_tiempo t ON f.tiempo_key = t.tiempo_key
@@ -583,7 +583,7 @@ def tab_consumo():
     """)
     orden = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
     trad  = {"Monday":"Lun","Tuesday":"Mar","Wednesday":"Mié",
-              "Thursday":"Jue","Friday":"Vie","Saturday":"Sáb","Sunday":"Dom"}
+             "Thursday":"Jue","Friday":"Vie","Saturday":"Sáb","Sunday":"Dom"}
     if not df_all.empty and "dia_semana" in df_all.columns:
         pivot = (df_all.pivot(index="dia_semana",columns="hora",values="kwh")
                        .reindex([d for d in orden if d in df_all["dia_semana"].values]))
@@ -609,13 +609,11 @@ def tab_consumo():
         ], className="g-3"),
     ])
 
-#  PESTAÑA 3 — ANOMALÍAS
-
+# PESTAÑA 3 — ANOMALÍAS
 def tab_anomalias():
     if not estado_sistema().get("dwh_ok"):
         return _sin_datos()
 
-    # 1. Gráfico de dispersión (usando query directo a tablas)
     df_p = dwh("""
         SELECT f.timestamp_real AS timestamp, r.region, f.kwh_intervalo
         FROM fact_consumo f
@@ -638,7 +636,6 @@ def tab_anomalias():
     g1.update_xaxes(tickformat="%d %b\n%H:%M", tickangle=0, tickfont=dict(size=10))
     g1.update_yaxes(title_text="kWh")
 
-    # 2. Picos por hora del día
     df_ph = dwh("SELECT hora, num_picos FROM v_perfil_horario ORDER BY hora")
     todas_horas = pd.DataFrame({"hora": range(24)})
     
@@ -660,7 +657,6 @@ def tab_anomalias():
     g2.update_xaxes(type="category", tickangle=-45, tickfont=dict(size=9))
     g2.update_yaxes(title_text="Número de picos")
 
-    # 3. Tabla top picos (usando query directo a tablas)
     df_top = dwh("""
         SELECT f.timestamp_real AS timestamp, h.ciudad, r.region,
                ROUND(f.kwh_intervalo::numeric,4) AS kwh, 
@@ -673,10 +669,10 @@ def tab_anomalias():
         LIMIT 10
     """)
     
-    tabla = html.Div(style={"overflowX":"auto"}, children=[
+    tabla_obj = html.Div(style={"overflowX":"auto"}, children=[
         html.Table(style={"width":"100%","borderCollapse":"collapse","fontSize":"12px"},
             children=[
-                html.Thead(html.Tr([
+                html.結婚thead(html.Tr([
                     html.Th(col, style={"color":SUBTXT,"padding":"8px","borderBottom":f"1px solid {BORDE}",
                                         "textAlign":"left","textTransform":"uppercase","fontSize":"10px"})
                     for col in df_top.columns
@@ -700,31 +696,15 @@ def tab_anomalias():
                          dcc.Graph(figure=g2,config={"displayModeBar":False}),borde=AMBAR), md=5),
         ], className="mb-3 g-3"),
         dbc.Row([
-            dbc.Col(card("Top 10 picos", tabla, borde=ROJO), md=12),
+            dbc.Col(card("Top 10 picos", tabla_obj, borde=ROJO), md=12),
         ], className="g-3"),
     ])
 
-#  PESTAÑA 4 — REPORTES PDF
-
+# PESTAÑA 4 — REPORTES PDF
 def tab_reportes():
-    """Pestaña de generación de reportes PDF."""
-    # Opciones de fechas/periodos disponibles en el DWH
-    try:
-        fechas  = dwh("SELECT DISTINCT fecha FROM dim_tiempo ORDER BY fecha DESC LIMIT 90")["fecha"].tolist()
-        meses   = dwh("SELECT DISTINCT year||'-'||LPAD(month::text, 2, '0') AS mes FROM dim_tiempo ORDER BY mes DESC")["mes"].tolist()
-        semanas = dwh("SELECT DISTINCT year||'-W'||LPAD(EXTRACT(WEEK FROM fecha::date)::text, 2, '0') AS sem FROM dim_tiempo ORDER BY sem DESC")["sem"].tolist()
-        
-        horas   = dwh("""
-            SELECT DISTINCT fecha||' '||hora AS fh
-            FROM dim_tiempo ORDER BY fh DESC LIMIT 72
-        """)["fh"].tolist()
-    except Exception:
-        fechas = meses = semanas = horas = []
-
     return html.Div([
         dcc.Download(id="descarga-pdf"),
 
-        # Encabezado
         html.Div(style={
             "background": "linear-gradient(135deg, #1E3A5F 0%, #1E293B 100%)",
             "borderRadius": "12px", "padding": "24px", "marginBottom": "20px",
@@ -736,7 +716,6 @@ def tab_reportes():
         ]),
 
         dbc.Row([
-            # Panel izquierdo: configuración
             dbc.Col(html.Div(style={
                 "background": CARD, "borderRadius": "12px", "padding": "24px",
                 "border": f"1px solid {BORDE}",
@@ -782,7 +761,6 @@ def tab_reportes():
                 ]),
             ]), md=4),
 
-            # Panel derecho: preview
             dbc.Col(html.Div(style={
                 "background": CARD, "borderRadius": "12px", "padding": "24px",
                 "border": f"1px solid {BORDE}",
@@ -807,10 +785,9 @@ def _sin_datos():
                style={"color":SUBTXT,"fontSize":"12px","marginTop":"8px"}),
     ])
 
-#  ARRANQUE
-
-
-#  CALLBACKS — REPORTES PDF
+# ══════════════════════════════════════════════════════════
+#  CALLBACKS — REPORTES PDF (CON LA REPARACIÓN CRÍTICA)
+# ══════════════════════════════════════════════════════════
 
 @app.callback(
     Output("rep-selector-container", "children"),
@@ -820,25 +797,43 @@ def actualizar_selector(tipo):
     try:
         if tipo == "hora":
             opts = dwh("SELECT DISTINCT fecha||' '||hora AS fh FROM dim_tiempo ORDER BY fh DESC LIMIT 72")["fh"].tolist()
-            opts_fmt = [{"label": f"{str(fh)[-2:].zfill(2)}:00 h — {str(fh)[:10]}", "value": fh} for fh in opts if fh]
+            opts_fmt = []
+            for fh in opts:
+                if fh:
+                    fecha_part, hora_part = str(fh).split(" ")
+                    label = f"{hora_part.zfill(2)}:00 h — {fecha_part}"
+                    opts_fmt.append({"label": label, "value": str(fh)})
+                    
         elif tipo == "dia":
             opts = dwh("SELECT DISTINCT fecha FROM dim_tiempo ORDER BY fecha DESC LIMIT 90")["fecha"].tolist()
-            opts_fmt = [{"label": o, "value": o} for o in opts if o]
+            # 💡 SOLUCIÓN: Casteamos explícitamente a string cada fecha nativa de Postgres
+            opts_fmt = [{"label": str(o), "value": str(o)} for o in opts if o]
+            
         elif tipo == "semana":
             opts = dwh("SELECT DISTINCT year||'-W'||LPAD(EXTRACT(WEEK FROM fecha::date)::text,2,'0') AS sem FROM dim_tiempo ORDER BY sem DESC")["sem"].tolist()
-            opts_fmt = [{"label": o, "value": o} for o in opts if o]
+            opts_fmt = [{"label": str(o), "value": str(o)} for o in opts if o]
+            
         else:  # mes
             opts = dwh("SELECT DISTINCT year||'-'||LPAD(month::text,2,'0') AS mes FROM dim_tiempo ORDER BY mes DESC")["mes"].tolist()
-            opts_fmt = [{"label": o, "value": o} for o in opts if o]
+            opts_fmt = [{"label": str(o), "value": str(o)} for o in opts if o]
+            
     except Exception as e:
+        print(f"❌ Error en actualizar_selector: {e}")
         opts_fmt = []
 
     if not opts_fmt:
         return html.P("Sin datos en el DWH aún.", style={"color": SUBTXT, "fontSize": "12px"})
 
-    return dcc.Dropdown(
-        id="rep-valor", options=opts_fmt, value=opts_fmt[0]["value"] if opts_fmt else None,
-        clearable=False, style={"backgroundColor": BG, "color": TEXTO, "borderColor": BORDE},
+    return dbc.Select(
+        id="rep-valor", 
+        options=opts_fmt, 
+        value=opts_fmt[0]["value"] if opts_fmt else None,
+        style={
+            "backgroundColor": BG, 
+            "color": TEXTO, 
+            "borderColor": BORDE,
+            "cursor": "pointer"
+        },
     )
 
 
@@ -943,19 +938,23 @@ def descargar_pdf(n_clicks, tipo, valor):
         pdf_b64 = base64.b64encode(pdf_bytes).decode()
         return (
             {"base64": True, "content": pdf_b64, "filename": nombre, "type": "application/pdf"},
-            f"✓ Reporte generado: {nombre}"
+             f"✓ Reporte generado: {nombre}"
         )
     except Exception as e:
         return None, f"✗ Error: {str(e)}"
 
+# ══════════════════════════════════════════════════════════
+#  PUNTO DE ARRANQUE DEL DASHBOARD
+# ══════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     print("\n  ╔══════════════════════════════════════════════╗")
-    print("  ║  EnergyTrack — Dashboard                   ║")
-    print("  ║  Fuente: Data Warehouse únicamente         ║")
-    print("  ║                                            ║")
-    print("  ║  Terminal 1: python simulador_streaming.py ║")
-    print("  ║  Terminal 2: python pipeline.py            ║")
-    print("  ║  Terminal 3: python dashboard.py           ║")
-    print("  ║  Navegador:  http://127.0.0.1:8050         ║")
+    print("  ║  EnergyTrack — Dashboard (PRODUCTIVO)        ║")
+    print("  ║  Fuente: Data Warehouse únicamente           ║")
+    print("  ║                                              ║")
+    print("  ║  Terminal 1: python simulador_streaming.py   ║")
+    print("  ║  Terminal 2: python pipeline.py              ║")
+    print("  ║  Terminal 3: python dashboard.py             ║")
+    print("  ║  Navegador:  http://127.0.0.1:8050           ║")
     print("  ╚══════════════════════════════════════════════╝\n")
     app.run(debug=False, host="127.0.0.1", port=8050)

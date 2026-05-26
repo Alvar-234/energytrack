@@ -1,65 +1,45 @@
 """
-EnergyTrack — Simulador de Streaming
-=====================================
-Simula medidores inteligentes con valores realistas para México.
-
-Consumo objetivo por hogar promedio (factor=1.0):
-  - Mensual : ~250 kWh/mes
-  - Diario  : ~8.3 kWh/día
-  - Horario : ~0.35 kWh/hora
-  - Por lectura (3s): ~0.000292 kWh  (potencia ~350 W promedio)
-
-El consumo se modela en Watts y se convierte a kWh por intervalo:
-  kWh = Watts × (segundos / 3600)
+EnergyTrack — Simulador de Streaming (Versión Kafka / Arquitectura Kappa)
+========================================================================
+Simula medidores inteligentes emitiendo eventos directos en tiempo real.
 
 EJECUTAR: python simulador_streaming.py
 """
 
-import random, time, threading
-import pandas as pd
+import random
+import time
+import json
 import numpy as np
 from datetime import datetime
-from pathlib import Path
-from config import (LAKE_RAW, MEDIDORES, TARIFAS_CFE,
-                    INTERVALO_LECTURA_S, INTERVALO_LAKE_S)
+from kafka import KafkaProducer
+from config import KAFKA_CONFIG, MEDIDORES, INTERVALO_LECTURA_S
 
 # ══════════════════════════════════════════════════════════
 #  PERFIL DE POTENCIA REALISTA (Watts)
-#  Basado en consumo promedio mexicano ~250 kWh/mes
 # ══════════════════════════════════════════════════════════
 
 def watts_base(hora: int) -> tuple[float, float]:
-    """
-    Devuelve (media_watts, std_watts) para la hora dada.
-    Un hogar promedio mexicano usa ~350 W promedio,
-    con picos nocturnos de hasta 1,500-2,000 W (cocina, AC, TV).
-    """
-    if   0  <= hora <  6:   return  80,  30   # Madrugada: mínimo (focos, standby)
-    elif 6  <= hora <  9:   return 600, 200   # Mañana: ducha, desayuno, plancha
-    elif 9  <= hora < 13:   return 300, 100   # Media mañana: trabajo/escuela
-    elif 13 <= hora < 15:   return 700, 250   # Mediodía: comida, microondas
+    """Devuelve (media_watts, std_watts) para la hora dada."""
+    if   0  <= hora <  6:   return  80,  30   # Madrugada: mínimo
+    elif 6  <= hora <  9:   return 600, 200   # Mañana: ducha, desayuno
+    elif 9  <= hora < 13:   return 300, 100   # Media mañana: trabajo
+    elif 13 <= hora < 15:   return 700, 250   # Mediodía: comida
     elif 15 <= hora < 18:   return 250,  80   # Tarde: actividad baja
-    elif 18 <= hora < 22:   return 900, 350   # Noche: TV, AC, cocina, lavadora
-    else:                   return 200,  60   # Noche tardía: bajando
+    elif 18 <= hora < 22:   return 900, 350   # Noche: TV, AC, cocina
+    else:                   return 200,  60   # Noche tardía
 
-# Causas reales de lecturas nulas en medidores inteligentes
 CAUSAS_NULA = [
-    "timeout_comunicacion",  # el medidor no respondió a tiempo
-    "señal_debil",           # interferencia en la transmisión
-    "bateria_baja",          # medidor con batería baja
-    "reinicio_medidor",      # medidor reiniciando firmware
-    "corte_temporal",        # micro-corte de suministro (<1s)
+    "timeout_comunicacion",
+    "señal_debil",
+    "bateria_baja",
+    "reinicio_medidor",
+    "corte_temporal"
 ]
 
-# Probabilidad de lectura nula por ciclo (≈5% = 1 de cada 20 lecturas)
 PROB_NULA = 0.05
 
 def generar_lectura_nula(med_id, hog_id, ciudad, tarifa_clave) -> dict:
-    """
-    Simula una lectura fallida.
-    SE GUARDA en el Data Lake (auditoría histórica).
-    El ETL la detecta por estado != 'ok' y kwh=None → nunca llega al DWH.
-    """
+    """Simula una lectura fallida para enviar como evento crudo a Kafka."""
     return {
         "timestamp":       datetime.now().isoformat(timespec="seconds"),
         "id_medidor":      med_id,
@@ -75,24 +55,19 @@ def generar_lectura_nula(med_id, hog_id, ciudad, tarifa_clave) -> dict:
         "estado":          random.choice(CAUSAS_NULA),
     }
 
-def generar_lectura(med_id, hog_id, ciudad, tarifa_clave, factor):
+def generar_lectura(med_id, hog_id, ciudad, tarifa_clave, factor) -> dict:
+    """Genera una lectura eléctrica correcta."""
     hora = datetime.now().hour
-
-    # Potencia en Watts para este instante
     media_w, std_w = watts_base(hora)
     watts = max(10.0, np.random.normal(media_w * factor, std_w * factor))
 
-    # Pico de consumo (AC encendiendo, horno, etc.)
     es_pico = random.random() < 0.03
     if es_pico:
-        watts *= random.uniform(2.5, 4.0)   # 2.5x-4x el consumo normal
+        watts *= random.uniform(2.5, 4.0)
 
-    # Convertir a kWh para este intervalo de 3 segundos
     kwh = watts * (INTERVALO_LECTURA_S / 3600) / 1000
-
-    # Valores eléctricos derivados (red doméstica México: 127V)
     voltaje         = round(np.random.normal(127, 3), 1)
-    corriente       = round(watts / voltaje, 3)           # I = P/V
+    corriente       = round(watts / voltaje, 3)
     factor_potencia = round(random.uniform(0.85, 0.99), 3)
     potencia_w      = round(watts, 2)
 
@@ -112,115 +87,63 @@ def generar_lectura(med_id, hog_id, ciudad, tarifa_clave, factor):
     }
 
 # ══════════════════════════════════════════════════════════
-#  HILO 1 — PRODUCTOR
-# ══════════════════════════════════════════════════════════
-
-def hilo_productor(buffer, lock, stop):
-    ciclo = 0
-    while not stop.is_set():
-        ciclo += 1
-        ts = datetime.now().strftime("%H:%M:%S")
-        print(f"\n  [{ts}] Ciclo #{ciclo}")
-
-        nuevas = []
-        for med_id, hog_id, ciudad, tarifa_clave, factor in MEDIDORES:
-            # ~5% de probabilidad de lectura nula (va al lake, nunca al DWH)
-            if random.random() < PROB_NULA:
-                lectura = generar_lectura_nula(med_id, hog_id, ciudad, tarifa_clave)
-                nuevas.append(lectura)
-                causa = lectura["estado"]
-                print(f"    ✗ NULA | {med_id} | {ciudad:<20} | causa: {causa}")
-            else:
-                lectura = generar_lectura(med_id, hog_id, ciudad, tarifa_clave, factor)
-                nuevas.append(lectura)
-                estado = "⚠ PICO" if lectura["es_pico"] else "  ok  "
-                print(f"    {estado} | {med_id} | {ciudad:<20} | "
-                      f"{lectura['potencia_w']:>7.1f} W | {lectura['kwh_intervalo']:.6f} kWh")
-
-        with lock:
-            buffer.extend(nuevas)
-
-        stop.wait(INTERVALO_LECTURA_S)
-
-# ══════════════════════════════════════════════════════════
-#  HILO 2 — ESCRITOR AL DATA LAKE
-# ══════════════════════════════════════════════════════════
-
-def hilo_lake_writer(buffer, lock, stop):
-    while not stop.is_set():
-        stop.wait(INTERVALO_LAKE_S)
-        if stop.is_set():
-            break
-        vaciar_buffer(buffer, lock)
-
-def vaciar_buffer(buffer, lock):
-    with lock:
-        if not buffer:
-            return
-        lote = buffer.copy()
-        buffer.clear()
-
-    df = pd.DataFrame(lote)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df["lote"] = df["timestamp"].dt.strftime("%Y-%m-%d_%H")
-
-    archivos = []
-    for lote_key, grupo in df.groupby("lote"):
-        ruta = LAKE_RAW / lote_key
-        ruta.mkdir(parents=True, exist_ok=True)
-        ts_str  = datetime.now().strftime("%H%M%S")
-        archivo = ruta / f"stream_{ts_str}.parquet"
-        grupo.drop(columns=["lote"]).to_parquet(archivo, index=False)
-        archivos.append((archivo, len(grupo)))
-
-    ts = datetime.now().strftime("%H:%M:%S")
-    total = sum(n for _, n in archivos)
-    print(f"\n  [{ts}] 💾 DATA LAKE ← {total} lecturas")
-    for archivo, n in archivos:
-        kb = archivo.stat().st_size / 1024
-        print(f"    → {archivo}  ({n} filas, {kb:.1f} KB)")
-
-# ══════════════════════════════════════════════════════════
-#  PUNTO DE ENTRADA
+#  PUNTO DE ENTRADA PRINCIPAL
 # ══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    LAKE_RAW.mkdir(parents=True, exist_ok=True)
-
-    # Mostrar resumen de tarifas activas
+    # Mostrar pantalla de inicio
     print("=" * 65)
-    print("  EnergyTrack — Simulador de Streaming")
+    print("  EnergyTrack — Simulador de Streaming (PRODUCTOR KAFKA)")
     print("=" * 65)
-    print(f"  Medidores    : {len(MEDIDORES)}")
-    print(f"  Lectura cada : {INTERVALO_LECTURA_S}s")
-    print(f"  Flush lake   : cada {INTERVALO_LAKE_S}s → {LAKE_RAW}/")
-    print()
-    print("  CONSUMO ESPERADO (factor=1.0 → ~250 kWh/mes):")
-    print(f"  {'Medidor':<10} {'Ciudad':<20} {'Tarifa':<6} {'Factor':>6}  {'kWh/mes est.':>12}")
-    print("  " + "-"*60)
-    for med_id, hog_id, ciudad, tarifa_clave, factor in MEDIDORES:
-        kwh_mes = round(250 * factor, 0)
-        print(f"  {med_id:<10} {ciudad:<20} {tarifa_clave:<6} {factor:>6.1f}  {kwh_mes:>10.0f} kWh")
+    print(f"  Medidores activos: {len(MEDIDORES)}")
+    print(f"  Frecuencia envío : Cada {INTERVALO_LECTURA_S}s")
+    print(f"  Tópico Kafka     : {KAFKA_CONFIG['topic_lecturas']}")
     print("=" * 65)
-    print("  Ctrl+C para detener")
+    
+    # 1. Inicializar el Productor de Kafka local
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_CONFIG["bootstrap_servers"],
+            # Convierte automáticamente los diccionarios Python a formato JSON listo para la red
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+        print("  ✓ Conexión exitosa con el Broker de Kafka.")
+    except Exception as e:
+        print(f"  ✗ Error crítico al conectar con Kafka: {e}")
+        print("  Asegúrate de haber ejecutado 'docker-compose up -d' primero.")
+        exit(1)
+
+    print("  Ctrl+C para detener la simulación")
     print("=" * 65)
 
-    buffer = []
-    lock   = threading.Lock()
-    stop   = threading.Event()
-
-    t1 = threading.Thread(target=hilo_productor,   args=(buffer, lock, stop), daemon=True)
-    t2 = threading.Thread(target=hilo_lake_writer, args=(buffer, lock, stop), daemon=True)
-    t1.start()
-    t2.start()
-
+    ciclo = 0
     try:
         while True:
-            time.sleep(1)
+            ciclo += 1
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"\n  [{ts}] Disparando ráfaga de eventos — Ciclo #{ciclo}")
+
+            for med_id, hog_id, ciudad, tarifa_clave, factor in MEDIDORES:
+                # Inyección aleatoria de datos fallidos (Calidad de datos)
+                if random.random() < PROB_NULA:
+                    lectura = generar_lectura_nula(med_id, hog_id, ciudad, tarifa_clave)
+                    print(f"    ✗ EVENTO NULO  | {med_id} | {ciudad:<16} | Causa: {lectura['estado']}")
+                else:
+                    lectura = generar_lectura(med_id, hog_id, ciudad, tarifa_clave, factor)
+                    estado = "⚠ PICO" if lectura["es_pico"] else "  ok  "
+                    print(f"    {estado} ENVIADO | {med_id} | {ciudad:<16} | "
+                          f"{lectura['potencia_w']:>7.1f} W | {lectura['kwh_intervalo']:.6f} kWh")
+
+                # 2. ENVIAR EL EVENTO INDIVIDUAL EN TIEMPO REAL A KAFKA
+                producer.send(KAFKA_CONFIG["topic_lecturas"], value=lectura)
+
+            # Forzar a Kafka a limpiar su buffer de red interno y asegurar el envío de la ráfaga
+            producer.flush()
+            
+            # Dormir los 3 segundos establecidos antes del siguiente ciclo de eventos
+            time.sleep(INTERVALO_LECTURA_S)
+
     except KeyboardInterrupt:
-        print("\n\n  Deteniendo...")
-        stop.set()
-        vaciar_buffer(buffer, lock)
-        t1.join(timeout=5)
-        t2.join(timeout=5)
-        print("  Simulador detenido.\n")
+        print("\n\n  [Sistema] Deteniendo el simulador...")
+        producer.close()
+        print("  [Sistema] Conexiones con Kafka cerradas. Simulador apagado.\n")

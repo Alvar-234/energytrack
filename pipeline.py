@@ -1,6 +1,6 @@
 """
-EnergyTrack — Pipeline ETL
-Lee del Data Lake (Parquet) → ETL → Data Warehouse (PostgreSQL)
+EnergyTrack — Pipeline ETL (Versión Streaming / Arquitectura Kappa)
+Lee directamente de Apache Kafka → ETL → Data Warehouse (PostgreSQL)
 
 EJECUTAR: python pipeline.py
 """
@@ -11,14 +11,16 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime
+from kafka import KafkaConsumer
 import psycopg2
 import psycopg2.extras
-from config import (LAKE_RAW, LAKE_PROCESSED, CHECKPOINT,
-                    MEDIDORES, TARIFAS_CFE, tarifa_de_ciudad,
-                    calcular_costo, INTERVALO_PIPELINE_S, PG_CONFIG)
+from config import (LAKE_PROCESSED, MEDIDORES, TARIFAS_CFE, tarifa_de_ciudad,
+                    calcular_costo, INTERVALO_PIPELINE_S, PG_CONFIG, KAFKA_CONFIG)
 from db import get_dwh_conn, dwh_query, dwh_execute, dwh_execute_script
 
-#  DDL — Esquema del Data Warehouse en PostgreSQL
+# ══════════════════════════════════════════════════════════
+#  DDL — Esquema del Data Warehouse (INTACTO)
+# ══════════════════════════════════════════════════════════
 
 DDL = [
     """
@@ -82,7 +84,6 @@ DDL = [
         num_picos    INTEGER
     )
     """,
-    # Índices para mejorar rendimiento en consultas analíticas
     "CREATE INDEX IF NOT EXISTS idx_fc_tiempo  ON fact_consumo(tiempo_key)",
     "CREATE INDEX IF NOT EXISTS idx_fc_hogar   ON fact_consumo(hogar_key)",
     "CREATE INDEX IF NOT EXISTS idx_fc_region  ON fact_consumo(region_key)",
@@ -147,18 +148,12 @@ VISTAS = {
 """,
 }
 
-#  INICIALIZAR DWH
-
 def inicializar_dwh():
     dwh_execute_script(DDL)
 
-    # Vistas
     for nombre, sql in VISTAS.items():
-        dwh_execute_script([
-            f"CREATE OR REPLACE VIEW {nombre} AS {sql}"
-        ])
+        dwh_execute_script([f"CREATE OR REPLACE VIEW {nombre} AS {sql}"])
 
-    # Dimensiones estáticas
     for clave, t in TARIFAS_CFE.items():
         dwh_execute(
             "INSERT INTO dim_region (region, tarifa_kwh) VALUES (%s, %s) ON CONFLICT (region) DO NOTHING",
@@ -178,45 +173,17 @@ def inicializar_dwh():
             (hog_id, med_id, ciudad, map_region.get(tarifa_clave))
         )
 
-#  CHECKPOINT
+# ══════════════════════════════════════════════════════════
+#  PASO 2 — ETL MODIFICADO (Recibe un DataFrame directo de Kafka)
+# ══════════════════════════════════════════════════════════
 
-def leer_checkpoint() -> set:
-    if CHECKPOINT.exists():
-        return set(json.loads(CHECKPOINT.read_text()).get("procesados", []))
-    return set()
-
-def guardar_checkpoint(procesados: set):
-    CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
-    CHECKPOINT.write_text(json.dumps({
-        "procesados":       list(procesados),
-        "ultima_ejecucion": datetime.now().isoformat(),
-    }, indent=2))
-
-#  PASO 1 — DETECTAR archivos nuevos
-
-def detectar_nuevos(procesados: set) -> list[Path]:
-    if not LAKE_RAW.exists():
-        return []
-    return [a for a in sorted(LAKE_RAW.rglob("*.parquet"))
-            if str(a) not in procesados]
-
-#  PASO 2 — ETL
-
-def etl(archivos: list[Path]) -> tuple[pd.DataFrame, dict]:
-    frames = []
-    for a in archivos:
-        try:
-            frames.append(pd.read_parquet(a))
-        except Exception as e:
-            print(f"    ⚠ Error leyendo {a.name}: {e}")
-
-    if not frames:
+def etl(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    if df.empty:
         return pd.DataFrame(), {}
 
-    df   = pd.concat(frames, ignore_index=True)
     stats = {"filas_raw": len(df)}
 
-    # Limpieza
+    # Limpieza de nulos y anomalías eléctricas
     df = df.dropna(subset=["kwh_intervalo", "timestamp"])
     df = df[df["kwh_intervalo"].between(0, 5)]
     if "voltaje" in df.columns:
@@ -224,15 +191,18 @@ def etl(archivos: list[Path]) -> tuple[pd.DataFrame, dict]:
     if "estado" in df.columns:
         df = df[df["estado"] == "ok"]
 
-    # Transformaciones
+    # Transformaciones temporales
     df["timestamp"]  = pd.to_datetime(df["timestamp"])
     df["hora"]       = df["timestamp"].dt.hour
     df["dia_semana"] = df["timestamp"].dt.day_name()
     df["es_finde"]   = df["timestamp"].dt.dayofweek >= 5
 
-    # Detección de picos (3σ)
+    # Detección de picos distributiva (3σ)
     media = df["kwh_intervalo"].mean()
     sigma = df["kwh_intervalo"].std()
+    if pd.isna(sigma) or sigma == 0:
+        sigma = 1.0  # Evita errores de división por cero si el lote es idéntico
+        
     df["es_pico"] = (
         (df["kwh_intervalo"] > media + 3 * sigma) |
         (df.get("es_pico", pd.Series(0, index=df.index)).astype(bool))
@@ -252,7 +222,9 @@ def etl(archivos: list[Path]) -> tuple[pd.DataFrame, dict]:
 
     return df, stats
 
-#  PASO 3 — GUARDAR en zona PROCESSED del lake
+# ══════════════════════════════════════════════════════════
+#  PASO 3 — RESPALDO HISTÓRICO (Mantiene tus datasets limpios)
+# ══════════════════════════════════════════════════════════
 
 def guardar_processed(df: pd.DataFrame) -> list[Path]:
     guardados = []
@@ -270,7 +242,9 @@ def guardar_processed(df: pd.DataFrame) -> list[Path]:
 
     return guardados
 
-#  PASO 4 — CARGA INCREMENTAL al DWH (PostgreSQL)
+# ══════════════════════════════════════════════════════════
+#  PASO 4 — CARGA INCREMENTAL AL DWH (INTACTO)
+# ══════════════════════════════════════════════════════════
 
 MESES_ES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
             7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",
@@ -280,14 +254,12 @@ def cargar_dwh(df: pd.DataFrame) -> int:
     conn = get_dwh_conn()
     cur  = conn.cursor()
 
-    # Mapas de claves surrogadas
     cur.execute("SELECT region, region_key FROM dim_region")
     map_region = {r[0]: r[1] for r in cur.fetchall()}
 
     cur.execute("SELECT id_hogar, hogar_key FROM dim_hogar")
     map_hogar = {r[0]: r[1] for r in cur.fetchall()}
 
-    # Insertar nuevos periodos en dim_tiempo
     ts_unicos = df["timestamp"].dt.floor("15min").unique()
     dim_tiempo_rows = []
     for ts in ts_unicos:
@@ -312,12 +284,10 @@ def cargar_dwh(df: pd.DataFrame) -> int:
     cur.execute("SELECT timestamp, tiempo_key FROM dim_tiempo")
     map_tiempo = {r[0]: r[1] for r in cur.fetchall()}
 
-    # Mapa hogar → tarifa
     med_hogar        = {med: hog for med, hog, *_ in MEDIDORES}
     med_tarifa_clave = {med: tar for med, _, _, tar, _ in MEDIDORES}
     hogar_tarifa     = {hog: tarifa_de_ciudad(ciudad) for _, hog, ciudad, *_ in MEDIDORES}
 
-    # Preparar hechos
     df["ts_key"] = df["timestamp"].dt.floor("15min").dt.strftime("%Y-%m-%dT%H:%M:%S")
     hechos = []
 
@@ -331,7 +301,7 @@ def cargar_dwh(df: pd.DataFrame) -> int:
             map_tiempo.get(row["ts_key"]),
             map_hogar.get(hog_id),
             map_region.get(tarifa_clave),
-            row["timestamp"],          # timestamp_real exacto
+            row["timestamp"],
             kwh,
             row.get("voltaje"),
             row.get("corriente"),
@@ -349,7 +319,6 @@ def cargar_dwh(df: pd.DataFrame) -> int:
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, hechos, page_size=500)
 
-    # Recalcular resumen diario para fechas afectadas
     fechas = df["timestamp"].dt.date.unique()
     for fecha in fechas:
         cur.execute("DELETE FROM fact_resumen_diario WHERE fecha = %s", (fecha,))
@@ -373,86 +342,109 @@ def cargar_dwh(df: pd.DataFrame) -> int:
     conn.close()
     return len(hechos)
 
-#  CICLO DEL PIPELINE
+# ══════════════════════════════════════════════════════════
+#  EJECUCIÓN CONTINUA DEL STREAM
+# ══════════════════════════════════════════════════════════
 
-def ejecutar_ciclo(procesados: set, num_ciclo: int) -> set:
+def ejecutar_ciclo(mensajes_raw: list[dict], num_ciclo: int):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"\n{'═'*55}")
-    print(f"  [{ts}] Pipeline — Ciclo #{num_ciclo}")
+    print(f"  [{ts}] Pipeline Streaming — Ventana #{num_ciclo}")
     print(f"{'═'*55}")
+    print(f"  Eventos extraídos de Kafka: {len(mensajes_raw)}")
 
-    nuevos = detectar_nuevos(procesados)
-    if not nuevos:
-        print("  ✓ Sin archivos nuevos en el lake. Esperando...")
-        return procesados
-
-    print(f"  Archivos nuevos en data_lake/raw: {len(nuevos)}")
-
-    print("\n  [ETL] Limpiando y transformando...")
-    df, stats = etl(nuevos)
+    df_raw = pd.DataFrame(mensajes_raw)
+    df, stats = etl(df_raw)
 
     if df.empty:
-        print("  ✗ ETL no produjo datos válidos.")
-        return procesados
+        print("  ✗ El flujo actual solo contenía datos inválidos o nulos.")
+        return
 
-    print(f"    · Leídas     : {stats['filas_raw']:,}")
-    print(f"    · Limpias    : {stats['filas_limpias']:,}  ({stats['filas_eliminadas']} eliminadas)")
+    print(f"    · Procesados : {stats['filas_raw']:,}")
+    print(f"    · Limpios    : {stats['filas_limpias']:,}  ({stats['filas_eliminadas']} eliminados)")
     print(f"    · Picos      : {stats['picos_detectados']}")
 
-    print("\n  [LAKE] Guardando en zona processed...")
+    # Mantiene la generación de datasets limpios para la entrega de tu proyecto
     archivos_proc = guardar_processed(df)
     for a in archivos_proc:
-        print(f"    → {a.relative_to(LAKE_PROCESSED.parent)}")
+        print(f"    → Guardado respaldo en Lake Processed: {a.name}")
 
-    print("\n  [PostgreSQL] Carga incremental al DWH...")
+    # Inserción incremental en PostgreSQL
     n_insertados = cargar_dwh(df)
-    print(f"    · Filas insertadas en fact_consumo: {n_insertados:,}")
+    print(f"    · Registros insertados en fact_consumo: {n_insertados:,}")
 
-    # Totales en el DWH
+    # Monitor de Totales en el DWH
     resumen = dwh_query("SELECT COUNT(*) AS total, ROUND(SUM(kwh_intervalo)::numeric, 4) AS kwh FROM fact_consumo")
     if not resumen.empty:
         row = resumen.iloc[0]
-        print(f"    · Total acumulado DWH: {int(row['total']):,} filas | {row['kwh']} kWh")
+        print(f"    · Total acumulado en DWH: {int(row['total']):,} filas | {row['kwh']} kWh")
 
-    procesados.update(str(a) for a in nuevos)
-    guardar_checkpoint(procesados)
-    print(f"\n  ✓ Checkpoint: {len(procesados)} archivos registrados")
-
-    return procesados
-
+# ══════════════════════════════════════════════════════════
 #  PUNTO DE ENTRADA
+# ══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    LAKE_RAW.mkdir(parents=True, exist_ok=True)
     LAKE_PROCESSED.mkdir(parents=True, exist_ok=True)
 
     print("=" * 55)
-    print("  EnergyTrack — Pipeline ETL")
+    print("  EnergyTrack — Pipeline ETL (CONSUMIDOR STREAMING)")
     print("=" * 55)
-    print(f"  Lake RAW       : {LAKE_RAW}/")
+    print(f"  Broker Kafka   : {KAFKA_CONFIG['bootstrap_servers']}")
+    print(f"  Tópico Escucha : {KAFKA_CONFIG['topic_lecturas']}")
     print(f"  Lake Processed : {LAKE_PROCESSED}/")
     print(f"  Data Warehouse : PostgreSQL — {PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['dbname']}")
-    print(f"  Ciclo cada     : {INTERVALO_PIPELINE_S}s")
     print("=" * 55)
 
-    print("\n  Inicializando Data Warehouse en PostgreSQL...")
+    print("\n  Inicializando Estructuras en PostgreSQL...")
     try:
         inicializar_dwh()
-        print("  ✓ DWH listo")
+        print("  ✓ DWH e índices listos para operar.")
     except Exception as e:
-        print(f"\n  ✗ No se pudo conectar a PostgreSQL: {e}")
-        print("  Verifica que PostgreSQL esté corriendo y que config.py tenga las credenciales correctas.")
+        print(f"\n  ✗ Error de conexión con PostgreSQL: {e}")
         exit(1)
 
-    procesados = leer_checkpoint()
-    print(f"  Archivos ya procesados: {len(procesados)}")
+    # Inicializar el Consumidor de Kafka
+    try:
+        consumer = KafkaConsumer(
+            KAFKA_CONFIG["topic_lecturas"],
+            bootstrap_servers=KAFKA_CONFIG["bootstrap_servers"],
+            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+            # 'earliest' asegura que lea todo lo que ya acumuló el simulador
+            auto_offset_reset='earliest', 
+            enable_auto_commit=True,
+            # Cambiamos el grupo a 'v2' para reiniciar la sesión en el broker
+            group_id='energytrack-pipeline-group-v2' 
+        )
+        print("  ✓ Conexión establecida con Kafka. Escuchando eventos...")
+    except Exception as e:
+        print(f"  ✗ Error crítico al conectar con Kafka: {e}")
+        exit(1)
 
     num_ciclo = 0
+    buffer_eventos = []
+    ultimo_flush = time.time()
+    
+    print("\n  Esperando ráfagas de datos en tiempo real... Ctrl+C para apagar.")
     try:
-        while True:
-            num_ciclo += 1
-            procesados = ejecutar_ciclo(procesados, num_ciclo)
-            print(f"\n  Próximo ciclo en {INTERVALO_PIPELINE_S}s...")
-            time.sleep(INTERVALO_PIPELINE_S)
+        # Bucle de escucha perenne (Streaming de eventos reactivos)
+        for mensaje in consumer:
+            buffer_eventos.append(mensaje.value)
+            
+            # Para optimizar el rendimiento de inserción y permitir que el cálculo matemático de picos (3-sigma) 
+            # funcione con un contexto real, procesamos los datos cuando se junta la ráfaga de los 8 medidores 
+            # o cada 5 segundos como máximo. Esto garantiza tiempo real con altísima eficiencia.
+            ahora = time.time()
+            if len(buffer_eventos) >= 8 or (ahora - ultimo_flush) >= 5:
+                num_ciclo += 1
+                ejecutar_ciclo(buffer_eventos, num_ciclo)
+                buffer_eventos.clear()
+                ultimo_flush = ahora
+                
     except KeyboardInterrupt:
-        print("\n\n  Pipeline detenido.\n")
+        print("\n\n  [Sistema] Apagando el pipeline de streaming de forma segura...")
+        if buffer_eventos:
+            print("  [Sistema] Procesando últimos eventos residuales del buffer...")
+            num_ciclo += 1
+            ejecutar_ciclo(buffer_eventos, num_ciclo)
+        consumer.close()
+        print("  [Sistema] Pipeline cerrado correctamente.\n")

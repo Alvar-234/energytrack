@@ -14,11 +14,20 @@ CHECKPOINT     = Path("data_lake/.checkpoint.json")
 # Conexión a PostgreSQL (Data Warehouse)
 PG_CONFIG = {
     "host":     "localhost",
-    "port":     5433,
-    "dbname":   "energytrack",
+    "port":     5432,
+    "dbname":   "EnergyTrack",
     "user":     "postgres",
-    "password": "contraseña",   # cambiar por tu contraseña
+    "password": "1234",   # cambiar por tu contraseña
 }
+
+# ==========================================
+# Configuración de Apache Kafka
+# ==========================================
+KAFKA_CONFIG = {
+    "bootstrap_servers": ["localhost:9092"],
+    "topic_lecturas":    "energytrack-lecturas"
+}
+# ==========================================
 
 # Ruta del stream buffer (sigue en SQLite — datos temporales) 
 STREAM_DB = "energytrack_stream.db"
