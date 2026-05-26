@@ -136,19 +136,36 @@ GRIS      = colors.HexColor("#94A3B8")
 GRIS_SUAVE= colors.HexColor("#1E293B")
 
 def _where_periodo(periodo: str, valor: str) -> str:
-    """Genera cláusula WHERE de forma segura."""
-    valor = str(valor)
-    if periodo == "hora" and " " in valor:
-        fecha, hora = valor.rsplit(" ", 1)
-        return f"t.fecha = '{fecha}' AND t.hora = {int(hora)}"
-    elif periodo == "dia":
-        return f"t.fecha = '{valor}'"
-    elif periodo == "semana" and "-W" in valor:
-        year, week = valor.split("-W")
-        return f"t.year = {year} AND EXTRACT(WEEK FROM t.fecha::date) = {int(week)}"
-    elif periodo == "mes" and "-" in valor:
-        year, month = valor.split("-")
-        return f"t.year = {year} AND t.month = {int(month)}"
+    """Genera cláusula WHERE de forma segura contra desincronizaciones de UI."""
+    valor = str(valor).strip()
+    if not valor:
+        return "1=1"
+        
+    try:
+        if periodo == "hora" and " " in valor:
+            fecha, hora = valor.rsplit(" ", 1)
+            return f"t.fecha = '{fecha}' AND t.hora = {int(hora)}"
+            
+        elif periodo == "dia":
+            # Si el valor no parece una fecha completa (ej. '2026-05'), ignoramos la petición
+            if len(valor.split(" ")[0]) >= 10: 
+                fecha = valor.split(" ")[0] 
+                return f"t.fecha = '{fecha}'"
+                
+        elif periodo == "semana" and "-W" in valor:
+            year, week = valor.split("-W")
+            return f"t.year = {year} AND EXTRACT(WEEK FROM t.fecha::date) = {int(week)}"
+            
+        elif periodo == "mes" and "-" in valor and "-W" not in valor:
+            parts = valor.split("-")
+            # Nos aseguramos de que realmente sea formato 'YYYY-MM'
+            if len(parts) == 2: 
+                year, month = parts
+                return f"t.year = {year} AND t.month = {int(month)}"
+                
+    except Exception:
+        pass
+        
     return "1=1"
 
 def _label_periodo(periodo: str, valor: str) -> str:
