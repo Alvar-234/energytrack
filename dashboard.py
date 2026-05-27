@@ -500,8 +500,12 @@ def _sb_capa(label, ok):
 #  ROUTING DE PESTAÑAS
 # ══════════════════════════════════════════════════════════
 
-@app.callback(Output("contenido","children"), Input("tabs","value"))
-def render(tab):
+@app.callback(
+    Output("contenido","children"), 
+    Input("tabs","value"),
+    Input("tick","n_intervals")
+)
+def render(tab, n_intervals):
     if tab == "metricas":  return tab_metricas()
     if tab == "consumo":   return tab_consumo()
     if tab == "anomalias": return tab_anomalias()
