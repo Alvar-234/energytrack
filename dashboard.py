@@ -693,7 +693,7 @@ def tab_anomalias():
     tabla_obj = html.Div(style={"overflowX":"auto"}, children=[
         html.Table(style={"width":"100%","borderCollapse":"collapse","fontSize":"12px"},
             children=[
-                html.結婚thead(html.Tr([
+                html.Thead(html.Tr([
                     html.Th(col, style={"color":SUBTXT,"padding":"8px","borderBottom":f"1px solid {BORDE}",
                                         "textAlign":"left","textTransform":"uppercase","fontSize":"10px"})
                     for col in df_top.columns
