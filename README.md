@@ -1,4 +1,4 @@
-# ⚡ EnergyTrack
+# EnergyTrack
 
 **Sistema de Monitoreo y Análisis de Consumo Energético en Hogares Mexicanos**
 
@@ -7,76 +7,98 @@
 
 ---
 
-## 👥 Equipo
+## Equipo
 
-| Nombre | Rol |
-|--------|-----|
-| Amador Suárez José Carlos | Desarrollo |
-| Flores Nuñez Dylan | Desarrollo |
-| Mendoza Prado Alvaro | Desarrollo |
+| Nombre |
+|--------|
+| Amador Suárez José Carlos |
+| Flores Nuñez Dylan |
+| Mendoza Prado Alvaro |
 
 ---
 
-## 📋 Descripción
+## Descripción
 
-EnergyTrack simula una red de medidores inteligentes en hogares mexicanos y procesa sus lecturas a través de una arquitectura completa de ingeniería de datos:
+EnergyTrack simula una red de medidores inteligentes en hogares mexicanos y procesa sus lecturas a través de una **Arquitectura Kappa** con Apache Kafka como canal central de eventos. Todos los datos —tanto en tiempo real como históricos— fluyen por el mismo pipeline de streaming, eliminando la necesidad de una capa batch separada.
 
 ```
 [Medidores simulados]
-        │  lectura cada 3 segundos
+        │  evento JSON cada 3 segundos por medidor
         ▼
-[Data Lake — Zona RAW]     ← Parquet particionado por hora
-        │  Pipeline ETL cada 35 segundos
+┌─────────────────────────────────────────┐
+│     Apache Kafka (Docker)               │
+│     Tópico: energytrack-lecturas        │  ← fuente de verdad
+│     Kafdrop: http://localhost:9000      │  ← monitoreo web
+└─────────────────────────────────────────┘
+        │  micro-lote (8 eventos o cada 5s)
         ▼
-[Data Lake — Zona Processed]  ← Parquet limpio por mes
-        │  Carga incremental
+[Pipeline ETL — KafkaConsumer]
+  1. Limpieza (nulos, rangos físicos, estado != ok)
+  2. Transformación (picos 3σ, costo CFE por bloques)
+  3. Respaldo histórico → data_lake/processed/ (Parquet)
+  4. Carga incremental → PostgreSQL (esquema estrella)
+        │
         ▼
-[Data Warehouse — PostgreSQL]  ← Esquema estrella
-        │  Consultas analíticas
+[Data Warehouse — PostgreSQL]
+  dim_tiempo · dim_hogar · dim_region
+  fact_consumo · fact_resumen_diario
+  5 vistas analíticas
+        │
         ▼
-[Dashboard interactivo]    ← Dash + Plotly + Reportes PDF
+[Dashboard — Dash + Plotly]
+  http://127.0.0.1:8050
+  4 pestañas + reportes PDF descargables
 ```
 
 ---
 
-## 🏗️ Arquitectura
+## Arquitectura Kappa
 
-| Capa | Tecnología | Descripción |
-|------|-----------|-------------|
-| Streaming | Python `threading` | Dos hilos: productor (3s) y lake writer (30s) |
-| Data Lake RAW | Apache Parquet | Datos crudos inmutables, particionados por hora |
-| Data Lake Processed | Apache Parquet | Datos limpios post-ETL, particionados por mes |
-| Pipeline ETL | Python + Pandas | Limpieza, transformación y carga incremental |
-| Data Warehouse | PostgreSQL | Esquema estrella con 3 tablas de hechos y 5 vistas |
-| Dashboard | Dash + Plotly | 4 pestañas + generación de reportes PDF |
+La **Arquitectura Kappa** usa un único flujo de streaming como fuente de verdad, a diferencia de Lambda que mantiene capas batch y streaming separadas. En EnergyTrack:
+
+- **Kafka** reemplaza el Data Lake RAW — cada evento publicado es inmutable y replayable
+- El **consumer group** gestiona los offsets automáticamente (reemplaza el checkpoint JSON)
+- Para reprocesar datos históricos basta con reiniciar el consumer con `auto_offset_reset='earliest'`
+- El **Data Lake Processed** se conserva como respaldo de auditoría, no como fuente primaria
+
+| Componente | Tecnología | Función |
+|------------|-----------|---------|
+| Broker de eventos | Apache Kafka 7.3 | Canal central de streaming |
+| Coordinador | Apache Zookeeper 7.3 | Gestión del cluster Kafka |
+| UI de monitoreo | Kafdrop | Visualización de tópicos y mensajes |
+| Productor | Python `kafka-python` | Envía lecturas al tópico |
+| Consumidor/ETL | Python `kafka-python` | Lee, transforma y carga al DWH |
+| Data Warehouse | PostgreSQL | Esquema estrella analítico |
+| Dashboard | Dash + Plotly | Visualización desde el DWH |
 
 ---
 
-## 📁 Estructura del proyecto
+## Estructura del proyecto
 
 ```
 EnergyTrack/
-├── config.py                  # Configuración central (rutas, tarifas CFE, medidores)
+├── config.py                  # Configuración central (Kafka, PostgreSQL, tarifas CFE)
 ├── db.py                      # Módulo de conexión a PostgreSQL (SQLAlchemy + psycopg2)
-├── simulador_streaming.py     # Genera lecturas en tiempo real → Data Lake RAW
-├── pipeline.py                # ETL: Lake RAW → Lake Processed → Data Warehouse
+├── simulador_streaming.py     # Productor Kafka: genera lecturas → tópico
+├── pipeline.py                # Consumidor Kafka: ETL → Lake Processed → DWH
 ├── dashboard.py               # Dashboard interactivo (lee solo del DWH)
+├── docker-compose.yml         # Infraestructura: Zookeeper + Kafka + Kafdrop
 ├── requirements.txt           # Dependencias Python
-└── data_lake/                 # Generado en tiempo de ejecución (en .gitignore)
-    ├── raw/                   # Zona RAW: Parquet crudos del stream
-    └── processed/             # Zona Processed: Parquet limpios post-ETL
+└── data_lake/
+    └── processed/             # Respaldo histórico post-ETL (Parquet por mes)
 ```
 
 ---
 
-## ⚙️ Requisitos previos
+## Requisitos previos
 
 - **Python** 3.11 o superior
-- **PostgreSQL** 14 o superior instalado y corriendo
+- **Docker Desktop** instalado y corriendo
+- **PostgreSQL** 14 o superior
 
 ---
 
-## 🚀 Instalación
+## Instalación
 
 ### 1. Clonar el repositorio
 
@@ -93,7 +115,7 @@ pip install -r requirements.txt
 
 ### 3. Configurar PostgreSQL
 
-Crea la base de datos en PostgreSQL:
+Crea la base de datos:
 
 ```sql
 -- En psql o pgAdmin:
@@ -105,32 +127,60 @@ Edita `config.py` con tus credenciales:
 ```python
 PG_CONFIG = {
     "host":     "localhost",
-    "port":     5432,          # cambia si usas otro puerto
+    "port":     5432,
     "dbname":   "energytrack",
     "user":     "postgres",
-    "password": "TU_PASSWORD", # ← tu contraseña
+    "password": "TU_PASSWORD",
+}
+```
+
+### 4. Configurar Kafka (opcional)
+
+El tópico y broker están en `config.py`. El valor por defecto funciona con el `docker-compose.yml` incluido:
+
+```python
+KAFKA_CONFIG = {
+    "bootstrap_servers": ["localhost:9092"],
+    "topic_lecturas":    "energytrack-lecturas",
 }
 ```
 
 ---
 
-## ▶️ Ejecución
+## Ejecución
 
-El sistema requiere **3 terminales** abiertas simultáneamente:
+### Paso 1 — Levantar la infraestructura Kafka (Docker)
 
-### Terminal 1 — Pipeline ETL
+```bash
+docker-compose up -d
+```
+
+Espera ~15 segundos a que Kafka esté listo. Puedes verificarlo en:
+- **Kafdrop** (UI de Kafka): http://localhost:9000
+
+Para detener Kafka al terminar:
+
+```bash
+docker-compose down
+```
+
+### Paso 2 — Arrancar los 3 componentes Python
+
+Abre **3 terminales** en la carpeta del proyecto:
+
+**Terminal 1 — Pipeline ETL (Consumidor Kafka)**
 ```bash
 python pipeline.py
 ```
-> Inicializa el Data Warehouse en PostgreSQL (tablas + vistas) y comienza a procesar archivos del lake cada 35 segundos.
+> Inicializa el DWH en PostgreSQL y comienza a escuchar eventos de Kafka.
 
-### Terminal 2 — Simulador de Streaming
+**Terminal 2 — Simulador (Productor Kafka)**
 ```bash
 python simulador_streaming.py
 ```
-> Genera lecturas de los 8 medidores cada 3 segundos y las vuelca al Data Lake cada 30 segundos.
+> Publica lecturas de 8 medidores cada 3 segundos en el tópico `energytrack-lecturas`.
 
-### Terminal 3 — Dashboard
+**Terminal 3 — Dashboard**
 ```bash
 python dashboard.py
 ```
@@ -138,20 +188,20 @@ python dashboard.py
 
 ---
 
-## 📊 Dashboard
+## Dashboard
 
-El dashboard tiene 4 pestañas, todas leyendo **exclusivamente del Data Warehouse**:
+El dashboard tiene 4 pestañas, todas leyendo **exclusivamente del Data Warehouse (PostgreSQL)**:
 
-| Pestaña | Contenido |
-|---------|-----------|
-| 📊 Métricas | KPIs globales, consumo por región (tarifa CFE), ranking de hogares |
-| 🔥 Consumo | Serie temporal diaria, curva de carga 24h, mapa de calor hora×día |
-| ⚠️ Anomalías | Dispersión temporal de picos, picos por hora, top 10 anomalías |
-| 📄 Reportes PDF | Genera y descarga reportes por hora / día / semana / mes |
+| Pestaña | Vista DWH usada | Contenido |
+|---------|----------------|-----------|
+| Métricas | `v_resumen_general`, `v_consumo_por_region`, `v_consumo_por_hogar` | KPIs, barras por tarifa CFE, ranking de hogares |
+| Consumo | `v_consumo_por_region`, `v_perfil_horario`, `fact_consumo` | Serie temporal, curva de carga, mapa de calor |
+| Anomalías | `v_picos`, `v_perfil_horario` | Dispersión de picos, top 10 anomalías |
+| Reportes PDF | Todas las vistas | Genera PDF descargable por hora / día / semana / mes |
 
 ---
 
-## 🔌 Medidores simulados
+## Medidores simulados
 
 | Medidor | Ciudad | Tarifa CFE | Factor | kWh/mes est. |
 |---------|--------|-----------|--------|-------------|
@@ -164,77 +214,95 @@ El dashboard tiene 4 pestañas, todas leyendo **exclusivamente del Data Warehous
 | MED-007 | Mérida | 1F (Máx. cal.) | 1.4 | 350 kWh |
 | MED-008 | Veracruz | 1C (Cal. fuerte) | 1.0 | 250 kWh |
 
-Las tarifas corresponden a las tarifas domésticas reales de la CFE 2026, asignadas por temperatura media de verano de cada región.
+Las tarifas corresponden a las tarifas domésticas reales de la CFE 2026, con estructura de bloques subsidiados según temperatura media de verano de cada región.
 
 ---
 
-## 🗄️ Esquema del Data Warehouse
+## Esquema del Data Warehouse
 
 ```
 dim_tiempo ──┐
 dim_region ──┼──► fact_consumo          (una fila por lectura)
-dim_hogar  ──┘
-                  fact_resumen_diario   (agregados diarios pre-calculados)
+dim_hogar  ──┘         │
+                       └──► fact_resumen_diario  (agregados diarios)
 
-Vistas analíticas:
-  v_consumo_por_region    → kWh y costo por región y fecha
-  v_consumo_por_hogar     → totales acumulados por hogar
-  v_perfil_horario        → curva de carga promedio (0-23h)
-  v_picos                 → detalle de anomalías detectadas
-  v_resumen_general       → KPIs globales del sistema
+Vistas analíticas pre-construidas:
+  v_consumo_por_region  → kWh y costo por tarifa CFE y fecha
+  v_consumo_por_hogar   → totales acumulados por hogar
+  v_perfil_horario      → curva de carga promedio (0–23h)
+  v_picos               → detalle de anomalías detectadas (3σ)
+  v_resumen_general     → KPIs globales del sistema
 ```
 
 ---
 
-## 🧹 Datos nulos y calidad
+## Datos nulos y calidad
 
-El simulador genera un **~5% de lecturas nulas** (configurado con `PROB_NULA = 0.05`) que representan fallas reales de medidores:
+El simulador genera un **~5% de lecturas nulas** que representan fallas reales de medidores:
 
-- `timeout_comunicacion` — Sin respuesta a tiempo
-- `señal_debil` — Interferencia en transmisión
-- `bateria_baja` — Batería insuficiente
-- `reinicio_medidor` — Reinicio de firmware
-- `corte_temporal` — Micro-corte eléctrico
+| Causa | Descripción |
+|-------|-------------|
+| `timeout_comunicacion` | Sin respuesta en tiempo esperado |
+| `señal_debil` | Interferencia en la transmisión |
+| `bateria_baja` | Batería insuficiente del medidor |
+| `reinicio_medidor` | Reinicio de firmware |
+| `corte_temporal` | Micro-corte eléctrico (<1s) |
 
-Estas lecturas **se guardan en el Data Lake** para auditoría histórica, pero el ETL las filtra y **nunca llegan al Data Warehouse**.
+Estas lecturas se **publican en Kafka** como parte del flujo real, pero el ETL las filtra (`estado != 'ok'` y `kwh_intervalo IS NULL`) y **nunca llegan al Data Warehouse**.
 
 ---
 
-## 🔄 Reiniciar desde cero
+## Reiniciar desde cero
 
 ```bash
-# Detener los 3 procesos (Ctrl+C)
+# 1. Detener los 3 procesos (Ctrl+C)
 
-# Windows
+# 2. Reiniciar Kafka (limpia todos los mensajes del tópico)
+docker-compose down -v
+docker-compose up -d
+
+# 3. Limpiar el Data Lake Processed (respaldo histórico)
+# Windows:
 rmdir /s /q data_lake
 
-# Linux / Mac
+# Linux / Mac:
 rm -rf data_lake/
 
-# Volver a arrancar
+# 4. Limpiar las tablas del DWH en PostgreSQL
+# En psql o pgAdmin:
+DROP TABLE IF EXISTS fact_resumen_diario, fact_consumo, dim_tiempo, dim_hogar, dim_region CASCADE;
+
+# 5. Volver a arrancar
 python pipeline.py
 python simulador_streaming.py
 python dashboard.py
 ```
 
----
+### Reprocesar datos históricos de Kafka
 
-## 📦 Dependencias
+Kafka conserva los mensajes por defecto 7 días. Para reprocesar desde el inicio sin borrar nada:
 
-```
-pandas          — Manipulación de DataFrames en el ETL
-numpy           — Generación de distribuciones de consumo
-pyarrow         — Lectura/escritura de archivos Parquet
-psycopg2-binary — Driver PostgreSQL para Python
-sqlalchemy      — Engine para integración pandas + PostgreSQL
-dash            — Framework del dashboard web
-plotly          — Gráficas interactivas
-dash-bootstrap-components — Componentes UI del dashboard
-reportlab       — Generación de reportes PDF
+```bash
+# Cambiar el group_id en pipeline.py a uno nuevo (ej. 'v3')
+# Kafka asignará el offset a 'earliest' automáticamente
+group_id='energytrack-pipeline-group-v3'
 ```
 
 ---
 
-## 📄 Licencia
+## Dependencias
 
-MIT License — Universidad Veracruzana 2026
+| Paquete | Uso |
+|---------|-----|
+| `kafka-python` | Productor y consumidor Kafka (Arquitectura Kappa) |
+| `pandas` | Manipulación de DataFrames en el ETL |
+| `numpy` | Generación de distribuciones de consumo realistas |
+| `pyarrow` | Lectura/escritura de archivos Parquet (Lake Processed) |
+| `psycopg2-binary` | Driver PostgreSQL para escritura masiva |
+| `sqlalchemy` | Engine para integración pandas + PostgreSQL |
+| `dash` | Framework del dashboard web interactivo |
+| `plotly` | Gráficas interactivas |
+| `dash-bootstrap-components` | Componentes UI del dashboard |
+| `reportlab` | Generación programática de reportes PDF |
+
+---
