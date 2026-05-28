@@ -14,8 +14,17 @@ from datetime import datetime
 from kafka import KafkaConsumer
 import psycopg2
 import psycopg2.extras
-from config import (LAKE_PROCESSED, MEDIDORES, TARIFAS_CFE, tarifa_de_ciudad,
-                    calcular_costo, INTERVALO_PIPELINE_S, PG_CONFIG, KAFKA_CONFIG)
+from config import (
+    LAKE_RAW,
+    LAKE_PROCESSED,
+    MEDIDORES,
+    TARIFAS_CFE,
+    tarifa_de_ciudad,
+    calcular_costo,
+    INTERVALO_PIPELINE_S,
+    PG_CONFIG,
+    KAFKA_CONFIG
+)
 from db import get_dwh_conn, dwh_query, dwh_execute, dwh_execute_script
 
 # ══════════════════════════════════════════════════════════
@@ -222,6 +231,38 @@ def etl(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     return df, stats
 
+
+# ══════════════════════════════════════════════════════════
+#  PASO 2.5 — CAPA RAW (Eventos Originales)
+# ══════════════════════════════════════════════════════════
+
+def guardar_raw(df: pd.DataFrame) -> list[Path]:
+    guardados = []
+
+    if df.empty:
+        return guardados
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    ruta = (
+        LAKE_RAW /
+        f"year={datetime.now().year}" /
+        f"month={datetime.now().month:02d}" /
+        f"day={datetime.now().day:02d}"
+    )
+
+    ruta.mkdir(parents=True, exist_ok=True)
+
+    archivo = ruta / f"raw_{ts}.parquet"
+
+    # Guarda exactamente los eventos originales provenientes de Kafka
+    df.to_parquet(archivo, index=False)
+
+    guardados.append(archivo)
+
+    return guardados
+
+
 # ══════════════════════════════════════════════════════════
 #  PASO 3 — RESPALDO HISTÓRICO (Mantiene tus datasets limpios)
 # ══════════════════════════════════════════════════════════
@@ -354,7 +395,9 @@ def ejecutar_ciclo(mensajes_raw: list[dict], num_ciclo: int):
     print(f"  Eventos extraídos de Kafka: {len(mensajes_raw)}")
 
     df_raw = pd.DataFrame(mensajes_raw)
+    archivos_raw = guardar_raw(df_raw)
     df, stats = etl(df_raw)
+
 
     if df.empty:
         print("  ✗ El flujo actual solo contenía datos inválidos o nulos.")
@@ -363,6 +406,8 @@ def ejecutar_ciclo(mensajes_raw: list[dict], num_ciclo: int):
     print(f"    · Procesados : {stats['filas_raw']:,}")
     print(f"    · Limpios    : {stats['filas_limpias']:,}  ({stats['filas_eliminadas']} eliminados)")
     print(f"    · Picos      : {stats['picos_detectados']}")
+    for a in archivos_raw:
+        print(f"    → Guardado RAW en Lake: {a.name}")
 
     # Mantiene la generación de datasets limpios para la entrega de tu proyecto
     archivos_proc = guardar_processed(df)
@@ -384,6 +429,7 @@ def ejecutar_ciclo(mensajes_raw: list[dict], num_ciclo: int):
 # ══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    LAKE_RAW.mkdir(parents=True, exist_ok=True)
     LAKE_PROCESSED.mkdir(parents=True, exist_ok=True)
 
     print("=" * 55)
