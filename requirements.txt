@@ -2,21 +2,20 @@
 # Instalar con: pip install -r requirements.txt
 
 # ── Streaming (Arquitectura Kappa) ────────────────────────
-kafka-python>=2.0.2      # cliente Kafka: KafkaProducer y KafkaConsumer
+kafka-python>=2.0.2       # cliente Kafka: KafkaProducer y KafkaConsumer
+
+# ── API REST (Backend del Frontend HTML) ──────────────────
+flask>=3.0.0              # servidor web y enrutador de endpoints
+flask-cors>=4.0.0         # habilita CORS para peticiones del frontend
 
 # ── Data & ETL ────────────────────────────────────────────
 pandas>=2.0.0
 numpy>=1.24.0
-pyarrow>=12.0.0          # soporte Parquet para el Data Lake Processed (respaldo)
+pyarrow>=12.0.0           # soporte Parquet para el Data Lake Processed (respaldo)
 
 # ── Base de datos ─────────────────────────────────────────
-psycopg2-binary>=2.9.0   # driver PostgreSQL nativo
-sqlalchemy>=2.0.0        # engine para integración pandas + PostgreSQL
-
-# ── Dashboard ─────────────────────────────────────────────
-dash>=2.14.0
-dash-bootstrap-components>=1.5.0
-plotly>=5.18.0
+psycopg2-binary>=2.9.0    # driver PostgreSQL nativo
+sqlalchemy>=2.0.0         # engine para integración pandas + PostgreSQL
 
 # ── Reportes PDF ──────────────────────────────────────────
 reportlab>=4.0.0

@@ -21,7 +21,7 @@
 
 EnergyTrack simula una red de medidores inteligentes en hogares mexicanos y procesa sus lecturas a través de una **Arquitectura Kappa** con Apache Kafka como canal central de eventos. Todos los datos —tanto en tiempo real como históricos— fluyen por el mismo pipeline de streaming, eliminando la necesidad de una capa batch separada.
 
-```
+```text
 [Medidores simulados]
         │  evento JSON cada 3 segundos por medidor
         ▼
@@ -45,21 +45,26 @@ EnergyTrack simula una red de medidores inteligentes en hogares mexicanos y proc
   5 vistas analíticas
         │
         ▼
-[Dashboard — Dash + Plotly]
-  http://127.0.0.1:8050
-  4 pestañas + reportes PDF descargables
+[Backend API REST — Flask]
+  [http://127.0.0.1:5000/api/](http://127.0.0.1:5000/api/)...
+  Generación de reportes PDF
+        │
+        ▼
+[Dashboard Frontend — HTML/JS]
+  frontend/index.html
+  4 pestañas nativas + Plotly.js
 ```
 
 ---
 
 ## Arquitectura Kappa
 
-La **Arquitectura Kappa** usa un único flujo de streaming como fuente de verdad, a diferencia de Lambda que mantiene capas batch y streaming separadas. En EnergyTrack:
+La **Arquitectura Kappa** usa un único flujo de streaming continuo como fuente de verdad para el procesamiento de datos. En EnergyTrack:
 
-- **Kafka** reemplaza el Data Lake RAW — cada evento publicado es inmutable y replayable
-- El **consumer group** gestiona los offsets automáticamente (reemplaza el checkpoint JSON)
-- Para reprocesar datos históricos basta con reiniciar el consumer con `auto_offset_reset='earliest'`
-- El **Data Lake Processed** se conserva como respaldo de auditoría, no como fuente primaria
+- **Kafka** actúa como la capa de ingestión y almacenamiento inmutable — cada evento publicado se conserva en un registro secuencial y "replayable".
+- El **consumer group** gestiona los offsets de lectura automáticamente, asegurando la continuidad del procesamiento y la tolerancia a fallos.
+- Para reprocesar datos históricos basta con reiniciar el consumer con `auto_offset_reset='earliest'`.
+- El **Data Lake Processed** se genera de forma paralela como un registro histórico para propósitos de auditoría y almacenamiento a largo plazo.
 
 | Componente | Tecnología | Función |
 |------------|-----------|---------|
@@ -69,21 +74,24 @@ La **Arquitectura Kappa** usa un único flujo de streaming como fuente de verdad
 | Productor | Python `kafka-python` | Envía lecturas al tópico |
 | Consumidor/ETL | Python `kafka-python` | Lee, transforma y carga al DWH |
 | Data Warehouse | PostgreSQL | Esquema estrella analítico |
-| Dashboard | Dash + Plotly | Visualización desde el DWH |
+| Backend API | Python `Flask` | Interfaz de datos y motor de PDFs |
+| Frontend UI | HTML, CSS, Vanilla JS, Plotly.js | Visualización desacoplada y reactiva |
 
 ---
 
 ## Estructura del proyecto
 
-```
+```text
 EnergyTrack/
 ├── config.py                  # Configuración central (Kafka, PostgreSQL, tarifas CFE)
 ├── db.py                      # Módulo de conexión a PostgreSQL (SQLAlchemy + psycopg2)
 ├── simulador_streaming.py     # Productor Kafka: genera lecturas → tópico
 ├── pipeline.py                # Consumidor Kafka: ETL → Lake Processed → DWH
-├── dashboard.py               # Dashboard interactivo (lee solo del DWH)
+├── api.py                     # API REST (Backend): sirve datos del DWH y genera PDFs
 ├── docker-compose.yml         # Infraestructura: Zookeeper + Kafka + Kafdrop
 ├── requirements.txt           # Dependencias Python
+├── frontend/
+│   └── index.html             # Dashboard nativo (Frontend): UI interactiva y minimalista
 └── data_lake/
     └── processed/             # Respaldo histórico post-ETL (Parquet por mes)
 ```
@@ -95,6 +103,7 @@ EnergyTrack/
 - **Python** 3.11 o superior
 - **Docker Desktop** instalado y corriendo
 - **PostgreSQL** 14 o superior
+- Un navegador web moderno
 
 ---
 
@@ -103,7 +112,7 @@ EnergyTrack/
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/TU_USUARIO/energytrack.git
+git clone [https://github.com/TU_USUARIO/energytrack.git](https://github.com/TU_USUARIO/energytrack.git)
 cd energytrack
 ```
 
@@ -164,7 +173,7 @@ Para detener Kafka al terminar:
 docker-compose down
 ```
 
-### Paso 2 — Arrancar los 3 componentes Python
+### Paso 2 — Arrancar los componentes Python
 
 Abre **3 terminales** en la carpeta del proyecto:
 
@@ -180,17 +189,21 @@ python simulador_streaming.py
 ```
 > Publica lecturas de 8 medidores cada 3 segundos en el tópico `energytrack-lecturas`.
 
-**Terminal 3 — Dashboard**
+**Terminal 3 — API Backend**
 ```bash
-python dashboard.py
+python api.py
 ```
-> Abre el dashboard en: **http://127.0.0.1:8050**
+> Levanta el servidor Flask en **http://127.0.0.1:5000** conectándose al DWH.
+
+### Paso 3 — Abrir el Dashboard
+
+Navega a la carpeta `frontend` en tu explorador de archivos y haz **doble clic en `index.html`** para abrirlo en tu navegador. El dashboard consumirá automáticamente los datos de la API en tiempo real.
 
 ---
 
 ## Dashboard
 
-El dashboard tiene 4 pestañas, todas leyendo **exclusivamente del Data Warehouse (PostgreSQL)**:
+El dashboard es una SPA (Single Page Application) nativa que cuenta con 4 pestañas, las cuales leen de manera asíncrona a través de la API REST:
 
 | Pestaña | Vista DWH usada | Contenido |
 |---------|----------------|-----------|
@@ -220,7 +233,7 @@ Las tarifas corresponden a las tarifas domésticas reales de la CFE 2026, con es
 
 ## Esquema del Data Warehouse
 
-```
+```text
 dim_tiempo ──┐
 dim_region ──┼──► fact_consumo          (una fila por lectura)
 dim_hogar  ──┘         │
@@ -275,7 +288,7 @@ DROP TABLE IF EXISTS fact_resumen_diario, fact_consumo, dim_tiempo, dim_hogar, d
 # 5. Volver a arrancar
 python pipeline.py
 python simulador_streaming.py
-python dashboard.py
+python api.py
 ```
 
 ### Reprocesar datos históricos de Kafka
@@ -300,9 +313,5 @@ group_id='energytrack-pipeline-group-v3'
 | `pyarrow` | Lectura/escritura de archivos Parquet (Lake Processed) |
 | `psycopg2-binary` | Driver PostgreSQL para escritura masiva |
 | `sqlalchemy` | Engine para integración pandas + PostgreSQL |
-| `dash` | Framework del dashboard web interactivo |
-| `plotly` | Gráficas interactivas |
-| `dash-bootstrap-components` | Componentes UI del dashboard |
+| `flask` & `flask-cors`| API REST Backend para comunicación asíncrona |
 | `reportlab` | Generación programática de reportes PDF |
-
----

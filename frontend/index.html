@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EnergyTrack</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="sidebar-content">
+    <div class="logo-container">
+      <p class="logo-title">EnergyTrack</p>
+      <p class="logo-sub">Monitor energético · MX</p>
+    </div>
+
+    <div class="nav-section">
+      <p class="nav-label">Navegación</p>
+      <div class="nav-list">
+        <div class="nav-item active" onclick="switchTab('metricas', this)">Métricas</div>
+        <div class="nav-item" onclick="switchTab('consumo', this)">Consumo</div>
+        <div class="nav-item" onclick="switchTab('anomalias', this)">Anomalías</div>
+        <div class="nav-item" onclick="switchTab('reportes', this)">Reportes PDF</div>
+      </div>
+    </div>
+
+    <hr>
+    <div>
+      <p class="sec-label">Estado del sistema</p>
+      <div id="sb-estado">Cargando...</div>
+    </div>
+    <hr>
+    <div>
+      <p class="sec-label">Arquitectura</p>
+      <div id="sb-arq">
+        <div class="sb-capa">Kafka Local (Docker)</div>
+        <div class="sb-capa">ETL → Processed Respaldo</div>
+        <div class="sb-capa">Pipeline Streaming → DWH</div>
+        <div class="sb-capa">Dashboard Analítico ← DWH</div>
+      </div>
+    </div>
+  </div>
+  <p style="margin: 20px 20px 12px; color:var(--subtxt); font-size:12px; text-align:center; font-weight:500;">Proyecto Final · UV 2026</p>
+</div>
+
+<div id="main">
+  <div class="header">
+    <h3>Dashboard de Consumo Energético</h3>
+    <p>Fuente: Data Warehouse · Actualiza cada 10 segundos</p>
+  </div>
+
+  <div id="metricas" class="tab-content active">
+    <div class="kpi-row">
+      <div class="kpi"><p>Total lecturas</p><span id="kpi-lect" class="val">0</span><span class="unit">lecturas</span></div>
+      <div class="kpi"><p>Consumo total</p><span id="kpi-kwh" class="val">0</span><span class="unit">kWh</span></div>
+      <div class="kpi"><p>Costo estimado</p><span id="kpi-costo" class="val">$0</span><span class="unit">MXN</span></div>
+      <div class="kpi"><p>Picos detectados</p><span id="kpi-picos" class="val">0</span><span class="unit">eventos</span></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><p class="card-title">Consumo total por región ← v_consumo_por_region</p><div id="plot-regiones" class="chart-container" style="height:260px;"></div></div>
+      <div class="card"><p class="card-title">Ranking de hogares ← v_consumo_por_hogar</p><div id="plot-hogares" class="chart-container" style="height:340px;"></div></div>
+    </div>
+  </div>
+
+  <div id="consumo" class="tab-content">
+    <div class="grid-2" style="grid-template-columns: 7fr 5fr;">
+      <div class="card"><p class="card-title">Consumo diario por región ← v_consumo_por_region</p><div id="plot-serie" class="chart-container"></div></div>
+      <div class="card"><p class="card-title">Curva de carga ← v_perfil_horario</p><div id="plot-curva" class="chart-container"></div></div>
+    </div>
+    <div class="card"><p class="card-title">Mapa de calor — hora × día ← fact_consumo + dim_tiempo</p><div id="plot-heatmap" class="chart-container" style="height:230px;"></div></div>
+  </div>
+
+  <div id="anomalias" class="tab-content">
+    <div class="grid-2-eq" style="grid-template-columns: 7fr 5fr;">
+      <div class="card"><p class="card-title">Dispersión temporal de picos</p><div id="plot-dispersion" class="chart-container"></div></div>
+      <div class="card"><p class="card-title">Picos por hora ← v_perfil_horario</p><div id="plot-phoraria" class="chart-container"></div></div>
+    </div>
+    <div class="card"><p class="card-title">Top 10 picos</p><div style="overflow-x:auto;">
+      <table class="tabla-top">
+        <thead><tr><th>Timestamp</th><th>Ciudad</th><th>Región</th><th>kWh</th><th>Costo</th></tr></thead>
+        <tbody id="tabla-body"></tbody>
+      </table>
+    </div></div>
+  </div>
+
+  <div id="reportes" class="tab-content">
+    <div class="rep-header"><h4>Generador de Reportes PDF</h4><p>Consulta el Data Warehouse y exporta el reporte del periodo que necesites.</p></div>
+    <div class="rep-grid">
+      <div class="card">
+        <p class="card-title">Tipo de periodo</p>
+        <label class="radio-item"><input type="radio" name="rtipo" value="hora"> <span><strong>Hora</strong> <span style="color:var(--subtxt);font-size:13px">— detalle por hora</span></span></label>
+        <label class="radio-item"><input type="radio" name="rtipo" value="dia" checked> <span><strong>Día</strong> <span style="color:var(--subtxt);font-size:13px">— resumen diario</span></span></label>
+        <label class="radio-item"><input type="radio" name="rtipo" value="semana"> <span><strong>Semana</strong> <span style="color:var(--subtxt);font-size:13px">— resumen semanal</span></span></label>
+        <label class="radio-item"><input type="radio" name="rtipo" value="mes"> <span><strong>Mes</strong> <span style="color:var(--subtxt);font-size:13px">— resumen mensual</span></span></label>
+        <p class="card-title" style="margin-top:16px;">Periodo</p>
+        <select id="rvalor"></select>
+        <button class="btn-pdf" onclick="descargarPDF()">Generar y Descargar PDF</button>
+        <p id="rep-msg" style="text-align:center; color:var(--subtxt); font-size:13px; margin-top:12px;"></p>
+      </div>
+      <div class="card">
+        <p class="card-title">Previsualización</p>
+        <div id="rep-preview"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
