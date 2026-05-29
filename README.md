@@ -35,7 +35,7 @@ EnergyTrack simula una red de medidores inteligentes en hogares mexicanos y proc
 [Pipeline ETL — KafkaConsumer]
   1. Limpieza (nulos, rangos físicos, estado != ok)
   2. Transformación (picos 3σ, costo CFE por bloques)
-  3. Respaldo histórico → data_lake/processed/ (Parquet)
+  3. Respaldo histórico → date_lake/raw y data_lake/processed/ (Parquet)
   4. Carga incremental → PostgreSQL (esquema estrella)
         │
         ▼
