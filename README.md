@@ -93,6 +93,7 @@ EnergyTrack/
 ├── frontend/
 │   └── index.html             # Dashboard nativo (Frontend): UI interactiva y minimalista
 └── data_lake/
+    └── raw/
     └── processed/             # Respaldo histórico post-ETL (Parquet por mes)
 ```
 
@@ -112,7 +113,7 @@ EnergyTrack/
 ### 1. Clonar el repositorio
 
 ```bash
-git clone [https://github.com/TU_USUARIO/energytrack.git](https://github.com/TU_USUARIO/energytrack.git)
+git clone https://github.com/Alvar-234/energytrack.git
 cd energytrack
 ```
 
@@ -137,8 +138,8 @@ Edita `config.py` con tus credenciales:
 PG_CONFIG = {
     "host":     "localhost",
     "port":     5432,
-    "dbname":   "energytrack",
-    "user":     "postgres",
+    "dbname":   "TU_BD",
+    "user":     "TU_USUARIO",
     "password": "TU_PASSWORD",
 }
 ```
